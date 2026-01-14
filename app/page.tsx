@@ -29,8 +29,18 @@ export default function SphericalProjection() {
     z: '1.000'
   });
 
+  const app = useRef<any>(null);
+
   useEffect(() => {
     const MAX_THETA = Math.PI / 2;
+
+    const canvas2d = canvas2dRef.current;
+    if (!canvas2d) return;
+    const ctx2d = canvas2d.getContext('2d');
+    if (!ctx2d) return;
+
+    const container3d = container3dRef.current;
+    if (!container3d) return;
 
     const canvasState = {
       cx: 0,
@@ -67,34 +77,16 @@ export default function SphericalProjection() {
       }
     ];
 
-    let currentActiveIdx = activePointIdx;
     let isDragging = false;
+    let activePointForDrag = 0;
 
-    // Utility functions
     const toDeg = (rad: number) => (rad * 180 / Math.PI).toFixed(1);
     const fmt = (val: number) => {
       const s = val.toFixed(3);
       return s === '-0.000' ? '0.000' : s;
     };
 
-    // 2D Canvas setup
-    const canvas2d = canvas2dRef.current;
-    if (!canvas2d) return;
-    const ctx2d = canvas2d.getContext('2d');
-    if (!ctx2d) return;
-
-    function resize2d() {
-      if (!canvas2d) return;
-      const rect = canvas2d.parentElement!.getBoundingClientRect();
-      canvas2d.width = rect.width;
-      canvas2d.height = rect.height;
-      canvasState.cx = canvas2d.width / 2;
-      canvasState.cy = canvas2d.height / 2;
-      canvasState.maxRadiusPx = Math.min(canvasState.cx, canvasState.cy) * 0.9;
-      draw2d();
-    }
-
-    function updateUI() {
+    function updateUI(currentActiveIdx: number) {
       const p1 = points[0];
       const p2 = points[1];
       setP1Stats({ phi: toDeg(p1.phi), theta: toDeg(p1.theta) });
@@ -123,34 +115,7 @@ export default function SphericalProjection() {
       });
     }
 
-    function updatePointFromUV(idx: number, u: number, v: number) {
-      const p = points[idx];
-      p.u = u;
-      p.v = v;
-
-      const dx = u - canvasState.cx;
-      const dy = canvasState.cy - v;
-
-      p.radiusPx = Math.sqrt(dx * dx + dy * dy);
-      p.phi = Math.atan2(dy, dx);
-      p.theta = (p.radiusPx / canvasState.maxRadiusPx) * MAX_THETA;
-
-      if (p.theta > MAX_THETA) p.theta = MAX_THETA;
-
-      const sinT = Math.sin(p.theta);
-      const cosT = Math.cos(p.theta);
-      const sinP = Math.sin(p.phi);
-      const cosP = Math.cos(p.phi);
-
-      p.vec.set(sinT * cosP, sinT * sinP, cosT);
-
-      updateUI();
-      draw2d();
-      update3d(idx);
-      updateGreatCircle();
-    }
-
-    function draw2d() {
+    function draw2d(currentActiveIdx: number, isPoint2Enabled: boolean, isUiVisible: boolean) {
       if (!canvas2d || canvas2d.width === 0 || canvas2d.height === 0) return;
 
       ctx2d!.fillStyle = '#111827';
@@ -217,62 +182,111 @@ export default function SphericalProjection() {
       });
     }
 
-    function handleInputStart(clientX: number, clientY: number) {
-      const rect = canvas2d!.getBoundingClientRect();
-      const mouseX = clientX - rect.left;
-      const mouseY = clientY - rect.top;
+    function update3d(pointIdx: number, isPoint2Enabled: boolean) {
+      const p = points[pointIdx];
 
-      let minDist = Infinity;
-      let targetIdx = 0;
+      const visible = p.id === 0 || isPoint2Enabled;
+      p.visuals.arrow.visible = visible;
+      p.visuals.dropLine.visible = visible;
+      p.visuals.radiusLine.visible = visible;
+      p.visuals.phiArc.visible = visible;
+      p.visuals.thetaArc.visible = visible;
 
-      points.forEach((p) => {
-        if (!isPoint2Enabled && p.id === 1) return;
+      if (!visible) return;
 
-        const dx = p.u - mouseX;
-        const dy = p.v - mouseY;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < minDist) {
-          minDist = dist;
-          targetIdx = p.id;
-        }
-      });
+      const v = p.vec;
+      const x = v.x,
+        y = v.y,
+        z = v.z;
 
-      currentActiveIdx = targetIdx;
-      setActivePointIdx(targetIdx);
-      isDragging = true;
-      updatePointFromUV(currentActiveIdx, mouseX, mouseY);
+      p.visuals.arrow.setDirection(v);
+
+      p.visuals.dropLine.geometry.setFromPoints([
+        new THREE.Vector3(x, y, z),
+        new THREE.Vector3(x, y, 0)
+      ]);
+      p.visuals.dropLine.computeLineDistances();
+
+      p.visuals.radiusLine.geometry.setFromPoints([
+        new THREE.Vector3(0, 0, 0),
+        new THREE.Vector3(x, y, 0)
+      ]);
+
+      const phiPts = [];
+      const phiRes = 30;
+      const phiRadius = 0.3 + p.id * 0.1;
+      const startP = 0;
+      const endP = p.phi;
+      for (let i = 0; i <= phiRes; i++) {
+        const ang = startP + ((endP - startP) * i) / phiRes;
+        phiPts.push(new THREE.Vector3(phiRadius * Math.cos(ang), phiRadius * Math.sin(ang), 0));
+      }
+      p.visuals.phiArc.geometry.setFromPoints(phiPts);
+
+      const thetaPts = [];
+      const thetaRes = 30;
+      const thetaRadius = 0.4 + p.id * 0.1;
+      for (let i = 0; i <= thetaRes; i++) {
+        const ang = (p.theta * i) / thetaRes;
+        const r_xy = Math.sin(ang) * thetaRadius;
+        const z_local = Math.cos(ang) * thetaRadius;
+        thetaPts.push(
+          new THREE.Vector3(r_xy * Math.cos(p.phi), r_xy * Math.sin(p.phi), z_local)
+        );
+      }
+      p.visuals.thetaArc.geometry.setFromPoints(thetaPts);
     }
 
-    function handleInputMove(clientX: number, clientY: number) {
-      if (!isDragging) return;
-      const rect = canvas2d!.getBoundingClientRect();
-      updatePointFromUV(currentActiveIdx, clientX - rect.left, clientY - rect.top);
+    function updateGreatCircle(isPoint2Enabled: boolean, isGreatCircleEnabled: boolean) {
+      if (!isPoint2Enabled || !isGreatCircleEnabled) {
+        greatCircle.visible = false;
+        return;
+      }
+
+      const v1 = points[0].vec;
+      const v2 = points[1].vec;
+
+      const n = new THREE.Vector3().crossVectors(v1, v2).normalize();
+
+      if (n.lengthSq() < 0.001) {
+        greatCircle.visible = false;
+        return;
+      }
+
+      greatCircle.visible = true;
+
+      const targetQ = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 0, 1),
+        n
+      );
+      greatCircle.setRotationFromQuaternion(targetQ);
     }
 
-    const mouseDown = (e: MouseEvent) => handleInputStart(e.clientX, e.clientY);
-    const mouseMove = (e: MouseEvent) => handleInputMove(e.clientX, e.clientY);
-    const mouseUp = () => (isDragging = false);
-    const touchStart = (e: TouchEvent) => {
-      handleInputStart(e.touches[0].clientX, e.touches[0].clientY);
-      e.preventDefault();
-    };
-    const touchMove = (e: TouchEvent) => {
-      handleInputMove(e.touches[0].clientX, e.touches[0].clientY);
-      e.preventDefault();
-    };
-    const touchEnd = () => (isDragging = false);
+    function updatePointFromUV(idx: number, u: number, v: number) {
+      const p = points[idx];
+      p.u = u;
+      p.v = v;
 
-    canvas2d.addEventListener('mousedown', mouseDown);
-    window.addEventListener('mousemove', mouseMove);
-    window.addEventListener('mouseup', mouseUp);
-    canvas2d.addEventListener('touchstart', touchStart, { passive: false });
-    window.addEventListener('touchmove', touchMove, { passive: false });
-    window.addEventListener('touchend', touchEnd);
+      const dx = u - canvasState.cx;
+      const dy = canvasState.cy - v;
+
+      p.radiusPx = Math.sqrt(dx * dx + dy * dy);
+      p.phi = Math.atan2(dy, dx);
+      p.theta = (p.radiusPx / canvasState.maxRadiusPx) * MAX_THETA;
+
+      if (p.theta > MAX_THETA) p.theta = MAX_THETA;
+
+      const sinT = Math.sin(p.theta);
+      const cosT = Math.cos(p.theta);
+      const sinP = Math.sin(p.phi);
+      const cosP = Math.cos(p.phi);
+
+      p.vec.set(sinT * cosP, sinT * sinP, cosT);
+
+      app.current.needsRedraw = true;
+    }
 
     // 3D Setup
-    const container3d = container3dRef.current;
-    if (!container3d) return;
-
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(
       45,
@@ -372,90 +386,82 @@ export default function SphericalProjection() {
       scene.add(p.visuals.thetaArc);
     });
 
-    function update3d(pointIdx: number) {
-      const p = points[pointIdx];
+    app.current = {
+      points,
+      canvasState,
+      needsRedraw: true,
+      isDragging: false,
+      updatePointFromUV,
+      draw2d,
+      update3d,
+      updateGreatCircle,
+      updateUI,
+      camera,
+      renderer,
+      stateRef,
+    };
 
-      const visible = p.id === 0 || isPoint2Enabled;
-      p.visuals.arrow.visible = visible;
-      p.visuals.dropLine.visible = visible;
-      p.visuals.radiusLine.visible = visible;
-      p.visuals.phiArc.visible = visible;
-      p.visuals.thetaArc.visible = visible;
+    function handleInputStart(clientX: number, clientY: number, isPoint2Enabled: boolean) {
+      const rect = canvas2d!.getBoundingClientRect();
+      const mouseX = clientX - rect.left;
+      const mouseY = clientY - rect.top;
 
-      if (!visible) return;
+      let minDist = Infinity;
+      let targetIdx = 0;
 
-      const v = p.vec;
-      const x = v.x,
-        y = v.y,
-        z = v.z;
+      points.forEach((p) => {
+        if (!isPoint2Enabled && p.id === 1) return;
 
-      p.visuals.arrow.setDirection(v);
+        const dx = p.u - mouseX;
+        const dy = p.v - mouseY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < minDist) {
+          minDist = dist;
+          targetIdx = p.id;
+        }
+      });
 
-      p.visuals.dropLine.geometry.setFromPoints([
-        new THREE.Vector3(x, y, z),
-        new THREE.Vector3(x, y, 0)
-      ]);
-      p.visuals.dropLine.computeLineDistances();
-
-      p.visuals.radiusLine.geometry.setFromPoints([
-        new THREE.Vector3(0, 0, 0),
-        new THREE.Vector3(x, y, 0)
-      ]);
-
-      const phiPts = [];
-      const phiRes = 30;
-      const phiRadius = 0.3 + p.id * 0.1;
-      const startP = 0;
-      const endP = p.phi;
-      for (let i = 0; i <= phiRes; i++) {
-        const ang = startP + ((endP - startP) * i) / phiRes;
-        phiPts.push(new THREE.Vector3(phiRadius * Math.cos(ang), phiRadius * Math.sin(ang), 0));
-      }
-      p.visuals.phiArc.geometry.setFromPoints(phiPts);
-
-      const thetaPts = [];
-      const thetaRes = 30;
-      const thetaRadius = 0.4 + p.id * 0.1;
-      for (let i = 0; i <= thetaRes; i++) {
-        const ang = (p.theta * i) / thetaRes;
-        const r_xy = Math.sin(ang) * thetaRadius;
-        const z_local = Math.cos(ang) * thetaRadius;
-        thetaPts.push(
-          new THREE.Vector3(r_xy * Math.cos(p.phi), r_xy * Math.sin(p.phi), z_local)
-        );
-      }
-      p.visuals.thetaArc.geometry.setFromPoints(thetaPts);
+      activePointForDrag = targetIdx;
+      setActivePointIdx(targetIdx);
+      isDragging = true;
+      updatePointFromUV(targetIdx, mouseX, mouseY);
     }
 
-    function updateGreatCircle() {
-      if (!isPoint2Enabled || !isGreatCircleEnabled) {
-        greatCircle.visible = false;
-        return;
-      }
-
-      const v1 = points[0].vec;
-      const v2 = points[1].vec;
-
-      const n = new THREE.Vector3().crossVectors(v1, v2).normalize();
-
-      if (n.lengthSq() < 0.001) {
-        greatCircle.visible = false;
-        return;
-      }
-
-      greatCircle.visible = true;
-
-      const targetQ = new THREE.Quaternion().setFromUnitVectors(
-        new THREE.Vector3(0, 0, 1),
-        n
-      );
-      greatCircle.setRotationFromQuaternion(targetQ);
+    function handleInputMove(clientX: number, clientY: number) {
+      if (!isDragging) return;
+      const rect = canvas2d!.getBoundingClientRect();
+      updatePointFromUV(activePointForDrag, clientX - rect.left, clientY - rect.top);
     }
 
-    function animate() {
-      requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+    const mouseDown = (e: MouseEvent) => handleInputStart(e.clientX, e.clientY, stateRef.current.isPoint2Enabled);
+    const mouseMove = (e: MouseEvent) => handleInputMove(e.clientX, e.clientY);
+    const mouseUp = () => (isDragging = false);
+    const touchStart = (e: TouchEvent) => {
+      handleInputStart(e.touches[0].clientX, e.touches[0].clientY, stateRef.current.isPoint2Enabled);
+      e.preventDefault();
+    };
+    const touchMove = (e: TouchEvent) => {
+      handleInputMove(e.touches[0].clientX, e.touches[0].clientY);
+      e.preventDefault();
+    };
+    const touchEnd = () => (isDragging = false);
+
+    canvas2d.addEventListener('mousedown', mouseDown);
+    window.addEventListener('mousemove', mouseMove);
+    window.addEventListener('mouseup', mouseUp);
+    canvas2d.addEventListener('touchstart', touchStart, { passive: false });
+    window.addEventListener('touchmove', touchMove, { passive: false });
+    window.addEventListener('touchend', touchEnd);
+
+    function resize2d() {
+      if (!canvas2d) return;
+      const rect = canvas2d.parentElement!.getBoundingClientRect();
+      canvas2d.width = rect.width;
+      canvas2d.height = rect.height;
+      canvasState.cx = canvas2d.width / 2;
+      canvasState.cy = canvas2d.height / 2;
+      canvasState.maxRadiusPx = Math.min(canvasState.cx, canvasState.cy) * 0.9;
+      app.current.needsRedraw = true;
     }
 
     const handleResize = () => {
@@ -466,6 +472,7 @@ export default function SphericalProjection() {
         camera.aspect = container3d.clientWidth / container3d.clientHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(container3d.clientWidth, container3d.clientHeight);
+        app.current.needsRedraw = true;
       }
     };
 
@@ -485,10 +492,26 @@ export default function SphericalProjection() {
     updatePointFromUV(0, u1, v1);
     updatePointFromUV(1, u2, v2);
 
-    updateUI();
+    let animationFrameId: number;
+    function animate() {
+      animationFrameId = requestAnimationFrame(animate);
+      controls.update();
+
+      if (app.current?.stateRef && app.current.needsRedraw) {
+        const { activePointIdx, isPoint2Enabled, isUiVisible, isGreatCircleEnabled } = app.current.stateRef.current;
+        updateUI(activePointIdx);
+        draw2d(activePointIdx, isPoint2Enabled, isUiVisible);
+        points.forEach(p => update3d(p.id, isPoint2Enabled));
+        updateGreatCircle(isPoint2Enabled, isGreatCircleEnabled);
+        app.current.needsRedraw = false;
+      }
+
+      renderer.render(scene, camera);
+    }
     animate();
 
     return () => {
+      cancelAnimationFrame(animationFrameId);
       canvas2d.removeEventListener('mousedown', mouseDown);
       window.removeEventListener('mousemove', mouseMove);
       window.removeEventListener('mouseup', mouseUp);
@@ -497,12 +520,24 @@ export default function SphericalProjection() {
       window.removeEventListener('touchend', touchEnd);
       window.removeEventListener('resize', handleResize);
       renderer.dispose();
-      container3d.removeChild(renderer.domElement);
+      if (container3d.contains(renderer.domElement)) {
+        container3d.removeChild(renderer.domElement);
+      }
+      controls.dispose();
     };
-  }, [isPoint2Enabled, isGreatCircleEnabled, isUiVisible, activePointIdx]);
+  }, []);
+
+  const stateRef = useRef({ isUiVisible, isPoint2Enabled, isGreatCircleEnabled, activePointIdx });
+  stateRef.current = { isUiVisible, isPoint2Enabled, isGreatCircleEnabled, activePointIdx };
+
+  useEffect(() => {
+    if (app.current) {
+      app.current.needsRedraw = true;
+    }
+  }, [isUiVisible, isPoint2Enabled, isGreatCircleEnabled, activePointIdx]);
 
   return (
-    <div className="h-screen w-screen flex flex-col md:flex-row relative bg-gray-900 text-white">
+    <div className="h-screen w-screen grid grid-cols-2 relative bg-gray-900 text-white">
       <button
         onClick={() => setIsUiVisible(!isUiVisible)}
         className="absolute top-4 right-4 z-50 bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded shadow border border-gray-500 text-sm"
@@ -551,113 +586,37 @@ export default function SphericalProjection() {
         <div className="text-xs text-gray-500 mt-1 pl-6">※球面上の最短経路を含む円</div>
       </div>
 
-      <div className="relative w-full md:w-1/2 h-1/2 md:h-full border-b md:border-b-0 md:border-r border-gray-600 flex flex-col">
-        <div
-          className={`absolute top-2 left-2 z-10 bg-black/70 p-2 rounded text-sm pointer-events-none select-none transition-opacity duration-300 ${
-            !isUiVisible ? 'opacity-0' : ''
-          }`}
-        >
-          <h2 className="font-bold text-blue-400">画像平面 (Image Plane)</h2>
-          <p className="text-xs text-gray-300">点に近い場所をドラッグして移動</p>
-          <p className="text-xs text-gray-400 mt-1">
-            中心 (c<sub>x</sub>, c<sub>y</sub>) からの距離 ∝ θ
-          </p>
-          <p className="text-xs text-gray-400">
-            最大角度 θ<sub>max</sub> = 90°
-          </p>
-        </div>
+      <div className="relative h-full border-r border-gray-600 flex flex-col">
         <canvas ref={canvas2dRef} className="w-full h-full bg-gray-900 cursor-crosshair" />
 
         <div
-          className={`absolute bottom-4 left-4 right-4 bg-black/60 backdrop-blur p-2 rounded text-xs md:text-sm select-none pointer-events-none flex gap-4 justify-between transition-opacity duration-300 ${
+          className={`absolute bottom-4 left-4 right-4 bg-black/60 backdrop-blur p-2 rounded text-xs select-none pointer-events-none flex gap-4 justify-between transition-opacity duration-300 ${
             !isUiVisible ? 'opacity-0' : ''
           }`}
         >
-          <div className="flex-1 text-blue-300">
-            <div className="font-bold border-b border-blue-500/50 mb-1">Point 1 (Blue)</div>
-            <div className="grid grid-cols-2 gap-x-2">
-              <div>
-                φ: <span className="font-mono text-white">{p1Stats.phi}</span>°
-              </div>
-              <div>
-                θ: <span className="font-mono text-white">{p1Stats.theta}</span>°
-              </div>
-            </div>
-          </div>
           <div
             className="flex-1 text-fuchsia-300"
             style={{ visibility: isPoint2Enabled ? 'visible' : 'hidden' }}
           >
-            <div className="font-bold border-b border-fuchsia-500/50 mb-1">Point 2 (Magenta)</div>
-            <div className="grid grid-cols-2 gap-x-2">
-              <div>
-                φ: <span className="font-mono text-white">{p2Stats.phi}</span>°
-              </div>
-              <div>
-                θ: <span className="font-mono text-white">{p2Stats.theta}</span>°
-              </div>
-            </div>
           </div>
         </div>
       </div>
 
-      <div className="relative w-full md:w-1/2 h-1/2 md:h-full bg-black flex flex-col">
+      <div className="relative h-full bg-black flex flex-col">
         <div
           className={`absolute top-2 left-2 z-10 bg-black/70 p-2 rounded text-sm pointer-events-none select-none transition-opacity duration-300 ${
             !isUiVisible ? 'opacity-0' : ''
           }`}
         >
-          <h2 className="font-bold text-green-400">単位半球 (Unit Hemisphere)</h2>
-          <p className="text-xs text-gray-300">
-            ベクトル <span className="italic">v</span> = (x, y, z)
-            <sup>⊤</sup>
-          </p>
-          <p className="text-xs text-gray-400 mt-1">
-            <span className="text-red-400">赤線: θ</span> /{' '}
-            <span className="text-green-400">緑線: φ</span>
-          </p>
           <p className="text-xs text-gray-500 mt-1">※ドラッグでカメラ回転</p>
         </div>
         <div ref={container3dRef} className="w-full flex-grow relative overflow-hidden" />
 
         <div
-          className={`absolute bottom-0 w-full bg-black/60 backdrop-blur p-3 text-xs md:text-sm border-t border-gray-600 max-h-40 overflow-y-auto transition-opacity duration-300 ${
+          className={`absolute bottom-0 w-full bg-black/60 backdrop-blur p-3 text-xs border-t border-gray-600 max-h-40 overflow-y-auto transition-opacity duration-300 ${
             !isUiVisible ? 'opacity-0' : ''
           }`}
         >
-          <div className="mb-2 font-bold text-center border-b border-gray-600 pb-1 select-none flex justify-between px-2">
-            <span>
-              Active Point:{' '}
-              <span className={`${mathData.colorClass} font-bold`}>{mathData.name}</span>
-            </span>
-            <span className="opacity-50 tracking-wider">
-              <span className="italic">v</span> = [sinθcosφ, sinθsinφ, cosθ]
-              <sup>⊤</sup>
-            </span>
-          </div>
-          <div className="grid grid-cols-1 gap-2 font-mono select-text">
-            <div className="flex items-center">
-              <span className="w-8 text-red-400 font-bold">x</span> = sin(
-              <span className="text-red-300">{mathData.theta}</span>) × cos(
-              <span className="text-green-300">{mathData.phi}</span>) ={' '}
-              <span className="text-gray-400 ml-1">{mathData.sinTheta}</span> ×{' '}
-              <span className="text-gray-400">{mathData.cosPhi}</span>
-              <span className="ml-auto font-bold text-white">= {mathData.x}</span>
-            </div>
-            <div className="flex items-center">
-              <span className="w-8 text-green-400 font-bold">y</span> = sin(
-              <span className="text-red-300">{mathData.theta}</span>) × sin(
-              <span className="text-green-300">{mathData.phi}</span>) ={' '}
-              <span className="text-gray-400 ml-1">{mathData.sinTheta}</span> ×{' '}
-              <span className="text-gray-400">{mathData.sinPhi}</span>
-              <span className="ml-auto font-bold text-white">= {mathData.y}</span>
-            </div>
-            <div className="flex items-center">
-              <span className="w-8 text-blue-400 font-bold">z</span> = cos(
-              <span className="text-red-300">{mathData.theta}</span>)
-              <span className="ml-auto font-bold text-white">= {mathData.z}</span>
-            </div>
-          </div>
         </div>
       </div>
     </div>
